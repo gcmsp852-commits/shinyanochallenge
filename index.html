@@ -47,8 +47,8 @@
         }
         button:disabled { background: #555; cursor: not-allowed; color: #aaa; }
         
-        #startBtn { background: #81C784; color: #121212; } 
-        #startBtn:active { background: #66BB6A; }
+        #startBtn { background: #2196F3; color: #ffffff; } 
+        #startBtn:active { background: #1976D2; }
         
         #backBtn { background: #03DAC6; color: #000; margin-top: 30px; }
         #backBtn:active { background: #018786; }
@@ -96,16 +96,16 @@
     const overlayCanvas = document.getElementById('overlayCanvas');
     const ctx = overlayCanvas.getContext('2d');
     
+    // ▼ 処理用のCanvas
     const zxingCanvas = document.createElement('canvas');
     const zxingCtx = zxingCanvas.getContext('2d', { willReadFrequently: true });
 
     let isProcessing = false;
     let isScanning = false;
     let lastDetectTime = 0;
-    // ▼ スキャン間隔を短縮してレスポンス向上
     const SCAN_INTERVAL_MS = 150; 
     
-    let zxingMultiReader = null;
+    let codeReader = null; // BrowserMultiFormatReaderを使用
 
     let firstQR = null;
     let secondQR = null;
@@ -138,15 +138,18 @@
             throw new Error("ZXingライブラリが読み込めません。zxing.min.jsが同じ場所にあるか確認してください。");
         }
 
+        // ▼ 最も安定している BrowserMultiFormatReader に固定
         if (ZXing.BrowserMultiFormatReader) {
-            zxingMultiReader = new ZXing.BrowserMultiFormatReader();
-        } else if (ZXing.qrcode && ZXing.qrcode.QRCodeMultiReader) {
-            zxingMultiReader = new ZXing.qrcode.QRCodeMultiReader();
+            // ヒント（TRY_HARDER）を設定してインスタンス化
+            const hints = new Map();
+            hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
+            hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+            codeReader = new ZXing.BrowserMultiFormatReader(hints);
         } else {
             throw new Error("対応するZXingの読み取りクラスが見つかりません。");
         }
         
-        document.getElementById('detectorInfo').innerText = "🐢 エンジン: ZXing (ローカル・チューニング済)";
+        document.getElementById('detectorInfo').innerText = "🐢 エンジン: ZXing (ローカル・安定版)";
     }
 
     async function startCamera() {
@@ -156,7 +159,6 @@
         }
 
         try {
-            // ▼ 画質指定とオートフォーカスの強制設定を追加
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: { 
                     facingMode: 'environment',
@@ -214,42 +216,16 @@
             let detectedItems = [];
 
             try {
-                if (zxingMultiReader) {
-                    // ▼ パフォーマンス向上のため、処理用Canvasを縮小（重いJS処理を軽くする）
-                    const maxProcessWidth = 600; 
-                    const scale = overlayCanvas.width > maxProcessWidth ? maxProcessWidth / overlayCanvas.width : 1;
-                    
-                    zxingCanvas.width = overlayCanvas.width * scale;
-                    zxingCanvas.height = overlayCanvas.height * scale;
-                    zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
-                    
-                    const luminanceSource = new ZXing.HTMLCanvasElementLuminanceSource(zxingCanvas);
-                    const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
-                    
-                    // ▼ 精度向上のためのヒントを追加（TRY_HARDER）
-                    const hints = new Map();
-                    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
-                    hints.set(ZXing.DecodeHintType.TRY_HARDER, true); 
-                    
-                    if (typeof zxingMultiReader.decodeMultiple === 'function') {
-                        const results = zxingMultiReader.decodeMultiple(binaryBitmap, hints);
-                        detectedItems = results.map(r => {
-                            // 縮小して解析した座標を元のサイズに戻す
-                            const pts = r.getResultPoints().map(p => ({ x: p.getX() / scale, y: p.getY() / scale }));
-                            return { text: r.getText(), points: pts, center: getCenter(pts) };
-                        });
-                    } else if (typeof zxingMultiReader.decode === 'function' || typeof zxingMultiReader.decodeBitmap === 'function') {
-                        // 単一のQR読み取り用フォールバック
-                        const decodeFunc = zxingMultiReader.decode || zxingMultiReader.decodeBitmap;
-                        const result = decodeFunc.call(zxingMultiReader, binaryBitmap, hints);
-                        if (result) {
-                            const pts = result.getResultPoints().map(p => ({ x: p.getX() / scale, y: p.getY() / scale }));
-                            detectedItems = [{ text: result.getText(), points: pts, center: getCenter(pts) }];
-                        }
+                if (codeReader) {
+                    // ▼ 安定した単一読み取りメソッドを使用（見つからなければエラーを吐いて次に進む）
+                    const result = await codeReader.decodeFromVideoElement(video);
+                    if (result) {
+                        const pts = result.getResultPoints().map(p => ({ x: p.getX(), y: p.getY() }));
+                        detectedItems = [{ text: result.getText(), points: pts, center: getCenter(pts) }];
                     }
                 }
             } catch (err) {
-                // ZXingはQRがないと例外を投げる仕様のため無視
+                // ZXingはQRが見つからないと NotFoundException を投げるため、ここは完全に無視する
             }
 
             processDetections(detectedItems);
@@ -268,51 +244,29 @@
     function processDetections(items) {
         if (items.length === 0) return;
 
-        if (items.length >= 2) {
-            if (!firstQR) {
-                firstQR = items[0];
-                secondQR = items[1];
+        // 今回は単一読み取りの連続実行方式なので、items.length は通常1
+        const item = items[0];
+        
+        if (!firstQR) {
+            firstQR = item;
+            updateUI();
+        } else if (!secondQR) {
+            if (item.text !== firstQR.text) {
+                secondQR = item;
                 updateUI();
-                return;
-            }
-            if (firstQR && !secondQR) {
-                const dist0 = getDistance(firstQR.center, items[0].center);
-                const dist1 = getDistance(firstQR.center, items[1].center);
-                if (dist0 > dist1) {
-                    secondQR = items[0];
-                    firstQR = items[1]; 
-                } else {
-                    secondQR = items[1];
-                    firstQR = items[0]; 
-                }
-                updateUI();
-                return;
-            }
-        }
+            } else {
+                // 同じQRを読み取った場合は枠線の座標だけ更新して追従させる
+                const dist = getDistance(firstQR.center, item.center);
+                const qrSize = getDistance(item.points[0], item.points[1]);
+                
+                const distanceThreshold = Math.min(overlayCanvas.width * 0.1, qrSize * 0.45);
 
-        if (items.length === 1) {
-            const item = items[0];
-            
-            if (!firstQR) {
-                firstQR = item;
-                updateUI();
-            } else if (!secondQR) {
-                if (item.text !== firstQR.text) {
+                if (dist > distanceThreshold) {
                     secondQR = item;
                     updateUI();
                 } else {
-                    const dist = getDistance(firstQR.center, item.center);
-                    const qrSize = getDistance(item.points[0], item.points[1]);
-                    
-                    const distanceThreshold = Math.min(overlayCanvas.width * 0.1, qrSize * 0.45);
-
-                    if (dist > distanceThreshold) {
-                        secondQR = item;
-                        updateUI();
-                    } else {
-                        firstQR.points = item.points;
-                        firstQR.center = item.center;
-                    }
+                    firstQR.points = item.points;
+                    firstQR.center = item.center;
                 }
             }
         }
