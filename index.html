@@ -47,8 +47,9 @@
         }
         button:disabled { background: #555; cursor: not-allowed; color: #aaa; }
         
-        #startBtn { background: #81C784; color: #121212; } 
-        #startBtn:active { background: #66BB6A; }
+ #startBtn { background: #2196F3; color: #ffffff; } 
+        #startBtn:active { background: #1976D2; }
+
         
         #backBtn { background: #03DAC6; color: #000; margin-top: 30px; }
         #backBtn:active { background: #018786; }
@@ -109,35 +110,54 @@
     let firstQR = null;
     let secondQR = null;
 
+    // ▼ エラー時にフリーズしないよう try...catch を追加
     async function startApp() {
         const startBtn = document.getElementById('startBtn');
         startBtn.disabled = true;
         startBtn.innerText = "準備中...";
 
-        await initEngines();
-        const success = await startCamera();
-        
-        if (success) {
-            document.getElementById('startScreen').style.display = 'none';
-            document.getElementById('cameraContainer').style.display = 'block';
-            document.getElementById('statusPanel').style.display = 'block';
-        } else {
+        try {
+            await initEngines();
+            const success = await startCamera();
+            
+            if (success) {
+                document.getElementById('startScreen').style.display = 'none';
+                document.getElementById('cameraContainer').style.display = 'block';
+                document.getElementById('statusPanel').style.display = 'block';
+            } else {
+                throw new Error("カメラの起動処理が中断されました。");
+            }
+        } catch (error) {
+            alert("エラー: " + error.message);
             startBtn.disabled = false;
             startBtn.innerText = "📷 カメラを起動する";
         }
     }
 
-    // ▼ NativeのBarcodeDetector処理を削除し、ZXingのみに限定 ▼
+    // ▼ UMD版ZXingで確実に存在するクラスにフォールバック処理を追加
     async function initEngines() {
-        if (typeof ZXing !== 'undefined') {
-            zxingMultiReader = new ZXing.qrcode.QRCodeMultiReader();
-            document.getElementById('detectorInfo').innerText = "🐢 エンジン: ZXing (ローカル)";
-        } else {
-            alert("ZXingライブラリの読み込みに失敗しました。ローカルに zxing.min.js が保存されているか確認してください。");
+        if (typeof ZXing === 'undefined') {
+            throw new Error("ZXingライブラリが読み込めません。zxing.min.jsが同じ場所にあるか確認してください。");
         }
+
+        if (ZXing.BrowserMultiFormatReader) {
+            zxingMultiReader = new ZXing.BrowserMultiFormatReader();
+        } else if (ZXing.qrcode && ZXing.qrcode.QRCodeMultiReader) {
+            zxingMultiReader = new ZXing.qrcode.QRCodeMultiReader();
+        } else {
+            throw new Error("対応するZXingの読み取りクラスが見つかりません。");
+        }
+        
+        document.getElementById('detectorInfo').innerText = "🐢 エンジン: ZXing (ローカル)";
     }
 
     async function startCamera() {
+        // ▼ Android等でローカルファイルとして開いた場合のセキュリティ制限対策
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            alert("【警告】カメラAPIがブロックされています。\nAndroidではローカルファイル（file://）からカメラを起動できません。GitHub Pages等のHTTPS環境で開いてください。");
+            return false;
+        }
+
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: { facingMode: 'environment' }
@@ -155,7 +175,7 @@
             requestAnimationFrame(scanLoop);
             return true;
         } catch (err) {
-            alert("カメラを起動できませんでした。\n権限を確認してください。\nエラー: " + err.message);
+            alert("カメラを起動できませんでした。\n権限を確認してください。\n詳細: " + err.message);
             return false;
         }
     }
@@ -191,7 +211,6 @@
             let detectedItems = [];
 
             try {
-                // ▼ ZXingの処理のみに限定 ▼
                 if (zxingMultiReader) {
                     zxingCanvas.width = overlayCanvas.width;
                     zxingCanvas.height = overlayCanvas.height;
@@ -199,16 +218,27 @@
                     
                     const luminanceSource = new ZXing.HTMLCanvasElementLuminanceSource(zxingCanvas);
                     const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
-                    const hints = new Map();
-                    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
                     
-                    const results = zxingMultiReader.decodeMultiple(binaryBitmap, hints);
-                    detectedItems = results.map(r => {
-                        const pts = r.getResultPoints().map(p => ({ x: p.getX(), y: p.getY() }));
-                        return { text: r.getText(), points: pts, center: getCenter(pts) };
-                    });
+                    // ▼ 読み込まれたクラスに合わせて解読メソッドを分岐
+                    if (typeof zxingMultiReader.decodeMultiple === 'function') {
+                        const hints = new Map();
+                        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
+                        const results = zxingMultiReader.decodeMultiple(binaryBitmap, hints);
+                        detectedItems = results.map(r => {
+                            const pts = r.getResultPoints().map(p => ({ x: p.getX(), y: p.getY() }));
+                            return { text: r.getText(), points: pts, center: getCenter(pts) };
+                        });
+                    } else if (typeof zxingMultiReader.decodeBitmap === 'function') {
+                        const result = zxingMultiReader.decodeBitmap(binaryBitmap);
+                        if (result) {
+                            const pts = result.getResultPoints().map(p => ({ x: p.getX(), y: p.getY() }));
+                            detectedItems = [{ text: result.getText(), points: pts, center: getCenter(pts) }];
+                        }
+                    }
                 }
-            } catch (err) { }
+            } catch (err) {
+                // ZXingはQRが見つからないとエラーを投げる仕様のためここは無視する
+            }
 
             processDetections(detectedItems);
             isProcessing = false;
